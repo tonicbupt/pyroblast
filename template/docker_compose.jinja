@@ -1,0 +1,126 @@
+version: '3.7'
+networks:
+  {{network}}:
+    external: true
+
+services:
+
+{% for pdservice in pdservices %}
+  {{pdservice.name}}:
+    image: {{pdservice.image}}
+    ports:
+      - "2379"
+    volumes:
+      - {{pdservice.base}}/config/pd.toml:/pd.toml:ro
+      - {{pdservice.base}}/data:/data
+      - {{pdservice.base}}/logs:/logs
+    command:
+      - --name={{pdservice.name}}
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://{{pdservice.name}}:2379
+      - --advertise-peer-urls=http://{{pdservice.name}}:2380
+      - --initial-cluster={%- for tmp in pdservices -%}{{tmp.name}}=http://{{tmp.name}}:2380{%- if not loop.last -%},{% endif %}{% endfor %}
+
+      - --data-dir=/data/{{pdservice.name}}
+      - --config=/pd.toml
+      - --log-file=/logs/{{pdservice.name}}.log
+      - --metrics-addr=pushgateway_{{cluster_name}}:9091
+    restart: on-failure
+    networks:
+      - {{network}}
+{% endfor %}
+
+{% for tikvservice in tikvservices %}
+  {{tikvservice.name}}:
+    image: {{tikvservice.image}}
+    volumes:
+      - {{tikvservice.base}}/config/tikv.toml:/tikv.toml:ro
+      - {{tikvservice.base}}/data:/data
+      - {{tikvservice.base}}/logs:/logs
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr={{tikvservice.name}}:20160
+      - --data-dir=/data/{{tikvservice.name}}
+      - --pd={%- for tmp in pdservices -%}{{tmp.name}}:2379{%- if not loop.last -%},{% endif %}{% endfor %}
+
+      - --config=/tikv.toml
+      - --log-file=/logs/{{tikvservice.name}}.log
+      - --metrics-addr=pushgateway_{{cluster_name}}:9091
+    depends_on:
+    {% for tmp in pdservices%}
+      - "{{tmp.name}}"
+    {% endfor %}
+    restart: on-failure
+    networks:
+      - {{network}}
+{% endfor %}
+
+  tidb_{{cluster_name}}:
+    image: {{tidb.image}}
+    ports:
+      - "4000"
+      - "10080"
+    volumes:
+      - {{tidb.base}}/config/tidb.toml:/tidb.toml:ro
+      - {{tidb.base}}/logs:/logs
+    command:
+      - --store=tikv
+      - --path={%- for tmp in pdservices -%}{{tmp.name}}:2379{%- if not loop.last -%},{% endif %}{% endfor %}
+
+      - --config=/tidb.toml
+      - --log-file=/logs/tidb.log
+      - --metrics-addr=pushgateway_{{cluster_name}}:9091
+    depends_on:
+    {% for tmp in tikvservices %}
+      - "{{tmp.name}}"
+    {% endfor %}
+    restart: on-failure
+    networks:
+      - {{network}}
+
+  pushgateway_{{cluster_name}}:
+    image: prom/pushgateway:v0.3.1
+    command:
+      - --log.level=error
+    restart: on-failure
+    networks:
+      - {{network}}
+    expose:
+      - "9091"
+
+  prometheus_{{cluster_name}}:
+    user: root
+    image: prom/prometheus:v2.2.1
+    command:
+      - --log.level=error
+      - --storage.tsdb.path=/data/prometheus
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090"
+    volumes:
+      - {{monitor.base}}/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - {{monitor.base}}/config/pd.rules.yml:/etc/prometheus/pd.rules.yml:ro
+      - {{monitor.base}}/config/tikv.rules.yml:/etc/prometheus/tikv.rules.yml:ro
+      - {{monitor.base}}/config/tidb.rules.yml:/etc/prometheus/tidb.rules.yml:ro
+      - {{monitor.base}}/data:/data
+    restart: on-failure
+    networks:
+      - {{network}}
+
+  grafana_{{cluster_name}}:
+    image: grafana/grafana:6.0.1
+    user: "0"
+    environment:
+      GF_LOG_LEVEL: error
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      GF_PATHS_CONFIG: /etc/grafana/grafana.ini
+    volumes:
+      - {{monitor.base}}/config/grafana:/etc/grafana
+      - {{monitor.base}}/config/dashboards:/tmp/dashboards
+      - {{monitor.base}}/data/grafana:/var/lib/grafana
+    ports:
+      - "3000"
+    restart: on-failure
+    networks:
+      - {{network}}
